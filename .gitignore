@@ -1,0 +1,24 @@
+# Dependencies and generated files
+**/node_modules/
+**/venv/
+**/.venv/
+**/__pycache__/
+**/*.py[cod]
+**/dist/
+**/.angular/
+**/coverage/
+
+# Local database and environment secrets
+**/*.db
+**/*.sqlite
+**/*.sqlite3
+**/.env
+**/.env.*
+!**/.env.example
+
+# Nested Git metadata
+**/.git/
+
+# OS files
+.DS_Store
+Thumbs.db
