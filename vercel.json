@@ -1,5 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "fastapi",
   "buildCommand": "npm --prefix turnos-web ci && npm --prefix turnos-web run build",
   "functions": {
     "backend/main.py": {
