@@ -1,3 +1,12 @@
+[project]
+name = "sistema-turnos"
+version = "1.0.0"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.140,<1",
+  "psycopg[binary]>=3.2,<4",
+  "uvicorn[standard]>=0.30",
+]
+
 [tool.vercel]
 entrypoint = "backend.main:app"
-
