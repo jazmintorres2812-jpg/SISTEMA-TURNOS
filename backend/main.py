@@ -43,6 +43,7 @@ class PgResult:
         return self.rows
 
     def __iter__(self):
+        """Allow direct row iteration like sqlite cursor results."""
         return iter(self.rows)
 
 
