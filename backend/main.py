@@ -329,8 +329,11 @@ async def recall(desk: int):
     row = active_ticket(desk)
     if not row:
         raise HTTPException(404, "La mesa no tiene turno activo")
-    await hub.broadcast({"type": "call", "desk": desk, "ticket": dict(row)})
-    return dict(row)
+    db.execute("UPDATE tickets SET called_at=? WHERE id=?", (now(), row["id"]))
+    db.commit()
+    ticket = dict(db.execute("SELECT * FROM tickets WHERE id=?", (row["id"],)).fetchone())
+    await hub.broadcast({"type": "call", "desk": desk, "ticket": ticket})
+    return ticket
 
 
 async def _transition(desk: int, allowed: tuple, new_status: str):
