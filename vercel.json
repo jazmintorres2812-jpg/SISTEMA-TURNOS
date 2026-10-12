@@ -1,0 +1,9 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm --prefix turnos-web ci && npm --prefix turnos-web run build",
+  "functions": {
+    "backend/main.py": {
+      "maxDuration": 60
+    }
+  }
+}
