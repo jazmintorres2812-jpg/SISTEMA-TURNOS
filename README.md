@@ -43,3 +43,9 @@ Abre `http://localhost:4200`. La ruta inicial abre el kiosco. Las pantallas disp
 - `/inicio`: menú de navegación.
 
 El backend escucha en el puerto `8000`. Para usar otros equipos en la red local, abre el frontend con la IP del equipo servidor.
+
+## Publicar la interfaz en Vercel
+
+El frontend Angular se despliega desde GitHub como proyecto separado. En Vercel importa este repositorio y configura **Root Directory** como `turnos-web`; el archivo `vercel.json` fija el comando de compilación y el directorio de salida, y mantiene operativas las rutas Angular.
+
+Antes de desplegar, configura `turnos-web/public/api-config.js` con la URL HTTPS del backend en `window.TURNOS_API_URL`. En la API hay que permitir en CORS el dominio de Vercel. La API actual usa WebSocket, SQLite local y temporizadores en memoria; no puede publicarse en Vercel Functions tal cual. Debe alojarse en un servicio persistente con WebSockets y base de datos persistente, o adaptarse a un backend administrado compatible.
