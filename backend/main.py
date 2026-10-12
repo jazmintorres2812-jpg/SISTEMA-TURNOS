@@ -2,8 +2,11 @@
 Ejecutar:  uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 """
 import asyncio
+import os
 import sqlite3
+from contextvars import ContextVar
 from datetime import date, datetime
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,20 +20,91 @@ SERVICES = {                       # prefijo -> nombre del servicio
 DESKS = [1, 2, 3, 4]               # mesas disponibles
 CALL_TIMEOUT_SECONDS = 60          # tiempo máximo para presentarse tras el llamado
 ATTENDING_TIMEOUT_SECONDS = 60     # duración máxima de una atención
-DB_FILE = "turnos.db"
+DB_FILE = os.getenv("TURNOS_DB_FILE", str(Path(__file__).with_name("turnos.db")))
+DATABASE_URL = os.getenv("DATABASE_URL", "").replace("postgres://", "postgresql://", 1)
+
+
+class PgRow(dict):
+    """PostgreSQL row with sqlite.Row-style key and index access."""
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return tuple(self.values())[key]
+        return super().__getitem__(key)
+
+
+class PgResult:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def fetchone(self):
+        return self.rows[0] if self.rows else None
+
+    def fetchall(self):
+        return self.rows
+
+
+class PgDatabase:
+    """Small sqlite-compatible adapter; request connections come from middleware."""
+    def __init__(self, url):
+        import psycopg
+        from psycopg.rows import dict_row
+        self.psycopg = psycopg
+        self.dict_row = dict_row
+        self.url = url
+        self.connection = ContextVar("turnos_pg_connection", default=None)
+        self.row_factory = None
+
+    def execute(self, sql, params=()):
+        conn = self.connection.get()
+        owned = conn is None
+        if owned:
+            conn = self.psycopg.connect(self.url, row_factory=self.dict_row)
+        try:
+            cursor = conn.cursor()
+            cursor.execute(sql.replace("?", "%s"), tuple(params))
+            rows = [PgRow(row) for row in cursor.fetchall()] if cursor.description else []
+            if owned:
+                conn.commit()
+            return PgResult(rows)
+        finally:
+            if owned:
+                conn.close()
+
+    def commit(self):
+        conn = self.connection.get()
+        if conn is not None:
+            conn.commit()
+
 
 # ---------- Base de datos ----------
-db = sqlite3.connect(DB_FILE, check_same_thread=False)
-db.row_factory = sqlite3.Row
-db.execute(
-    """CREATE TABLE IF NOT EXISTS tickets(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        prefix TEXT, number INTEGER, code TEXT,
-        status TEXT,            -- espera | llamado | atendiendo | finalizado | ausente
-        desk INTEGER, day TEXT,
-        created_at TEXT, called_at TEXT, finished_at TEXT)"""
-)
-db.commit()
+if DATABASE_URL:
+    import psycopg
+    from psycopg.rows import dict_row
+
+    db = PgDatabase(DATABASE_URL)
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS tickets(
+            id BIGSERIAL PRIMARY KEY,
+            prefix TEXT, number INTEGER, code TEXT,
+            status TEXT, desk INTEGER, day TEXT,
+            created_at TEXT, called_at TEXT, started_at TEXT, finished_at TEXT)"""
+    )
+    db.execute("ALTER TABLE tickets ADD COLUMN IF NOT EXISTS started_at TEXT")
+else:
+    db = sqlite3.connect(DB_FILE, check_same_thread=False)
+    db.row_factory = sqlite3.Row
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS tickets(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            prefix TEXT, number INTEGER, code TEXT,
+            status TEXT,            -- espera | llamado | atendiendo | finalizado | ausente
+            desk INTEGER, day TEXT,
+            created_at TEXT, called_at TEXT, started_at TEXT, finished_at TEXT)"""
+    )
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(tickets)").fetchall()}
+    if "started_at" not in columns:
+        db.execute("ALTER TABLE tickets ADD COLUMN started_at TEXT")
+    db.commit()
 lock = asyncio.Lock()
 
 
@@ -62,8 +136,9 @@ def get_state() -> dict:
 
 
 def active_ticket(desk: int):
+    for_update = " FOR UPDATE" if DATABASE_URL else ""
     return db.execute(
-        "SELECT * FROM tickets WHERE day=? AND desk=? AND status IN ('llamado','atendiendo')",
+        "SELECT * FROM tickets WHERE day=? AND desk=? AND status IN ('llamado','atendiendo')" + for_update,
         (today(), desk),
     ).fetchone()
 
@@ -71,6 +146,8 @@ def active_ticket(desk: int):
 async def dispatch_to_desk(desk: int):
     """Llama al turno más antiguo y programa su vencimiento."""
     async with lock:
+        if DATABASE_URL:
+            db.execute("SELECT pg_advisory_xact_lock(hashtext(?))", (f"desk:{today()}:{desk}",))
         if active_ticket(desk):
             return None
         row = db.execute(
@@ -143,6 +220,22 @@ hub = Hub()
 app = FastAPI(title="Turnos Laboratorio")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+if DATABASE_URL:
+    @app.middleware("http")
+    async def postgres_request_connection(request, call_next):
+        connection = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=10)
+        token = db.connection.set(connection)
+        try:
+            response = await call_next(request)
+            connection.commit()
+            return response
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            db.connection.reset(token)
+            connection.close()
+
 
 class NewTicket(BaseModel):
     service: str = "A"
@@ -150,7 +243,44 @@ class NewTicket(BaseModel):
 
 @app.get("/api/state")
 async def state():
+    await refresh_due_tickets()
     return get_state()
+
+
+async def refresh_due_tickets():
+    """Move expired tickets forward when the serverless API is polled."""
+    current = datetime.now()
+    for desk in DESKS:
+        was_expired = False
+        is_free = False
+        async with lock:
+            if DATABASE_URL:
+                db.execute("SELECT pg_advisory_xact_lock(hashtext(?))", (f"desk:{today()}:{desk}",))
+            row = active_ticket(desk)
+            if not row:
+                is_free = True
+            elif row["status"] == "llamado" and row["called_at"]:
+                elapsed = (current - datetime.fromisoformat(row["called_at"])).total_seconds()
+                if elapsed >= CALL_TIMEOUT_SECONDS:
+                    db.execute(
+                        "UPDATE tickets SET status='ausente', finished_at=? WHERE id=?",
+                        (now(), row["id"]),
+                    )
+                    db.commit()
+                    was_expired = True
+            elif row["status"] == "atendiendo" and row["started_at"]:
+                elapsed = (current - datetime.fromisoformat(row["started_at"])).total_seconds()
+                if elapsed >= ATTENDING_TIMEOUT_SECONDS:
+                    db.execute(
+                        "UPDATE tickets SET status='finalizado', finished_at=?, started_at=NULL WHERE id=?",
+                        (now(), row["id"]),
+                    )
+                    db.commit()
+                    was_expired = True
+        if was_expired:
+            await hub.state()
+        if was_expired or is_free:
+            await dispatch_to_desk(desk)
 
 
 @app.post("/api/tickets")
@@ -158,17 +288,20 @@ async def create_ticket(body: NewTicket):
     if body.service not in SERVICES:
         raise HTTPException(400, "Servicio inválido")
     async with lock:
+        if DATABASE_URL:
+            db.execute("SELECT pg_advisory_xact_lock(hashtext(?))", (f"ticket:{today()}:{body.service}",))
         n = db.execute(
             "SELECT COALESCE(MAX(number),0)+1 FROM tickets WHERE day=? AND prefix=? AND status IN ('espera','llamado','atendiendo')",
             (today(), body.service),
         ).fetchone()[0]
         code = f"{body.service}{n:02d}"
         cur = db.execute(
-            "INSERT INTO tickets(prefix,number,code,status,day,created_at) VALUES(?,?,?,?,?,?)",
+            "INSERT INTO tickets(prefix,number,code,status,day,created_at) VALUES(?,?,?,?,?,?) RETURNING id",
             (body.service, n, code, "espera", today(), now()),
         )
+        ticket_id = cur.fetchone()[0]
         db.commit()
-        ticket = dict(db.execute("SELECT * FROM tickets WHERE id=?", (cur.lastrowid,)).fetchone())
+        ticket = dict(db.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone())
     assigned = None
     for desk in DESKS:
         assigned = await dispatch_to_desk(desk)
@@ -207,8 +340,13 @@ async def _transition(desk: int, allowed: tuple, new_status: str):
         if not row or row["status"] not in allowed:
             raise HTTPException(409, "Acción no válida para el estado actual")
         db.execute(
-            "UPDATE tickets SET status=?, finished_at=? WHERE id=?",
-            (new_status, now() if new_status in ("finalizado", "ausente") else None, row["id"]),
+            "UPDATE tickets SET status=?, finished_at=?, started_at=? WHERE id=?",
+            (
+                new_status,
+                now() if new_status in ("finalizado", "ausente") else None,
+                now() if new_status == "atendiendo" else None,
+                row["id"],
+            ),
         )
         db.commit()
     await hub.state()
@@ -228,7 +366,7 @@ async def expire_attending_ticket(desk: int, ticket_id: int):
         if not row:
             return
         db.execute(
-            "UPDATE tickets SET status='finalizado', finished_at=? WHERE id=?",
+            "UPDATE tickets SET status='finalizado', finished_at=?, started_at=NULL WHERE id=?",
             (now(), ticket_id),
         )
         db.commit()
@@ -270,3 +408,8 @@ async def ws_endpoint(ws: WebSocket):
         pass
     finally:
         hub.clients.discard(ws)
+
+
+# Vercel builds the Angular app first, then FastAPI serves its files and API together.
+FRONTEND_DIST = Path(__file__).resolve().parents[1] / "turnos-web" / "dist" / "turnos-web" / "browser"
+app.frontend("/", directory=str(FRONTEND_DIST), fallback="index.html")
