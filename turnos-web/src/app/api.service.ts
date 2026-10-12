@@ -6,9 +6,10 @@ import { CallEvent, State, Ticket } from './models';
 @Injectable({ providedIn: 'root' })
 export class ApiService {
   private http = inject(HttpClient);
-  // Usa el mismo host desde el que se abre la página (funciona en red local)
-  private host = location.hostname + ':8000';
-  private base = `http://${this.host}/api`;
+  // Configurable en public/api-config.js para apuntar al backend publicado.
+  private apiRoot = (window as Window & { TURNOS_API_URL?: string }).TURNOS_API_URL?.replace(/\/$/, '')
+    || `${location.protocol}//${location.hostname}:8000`;
+  private base = `${this.apiRoot}/api`;
 
   state = signal<State>({ services: [], desks: [], waiting: [] });
   calls = new Subject<CallEvent>();
@@ -17,7 +18,8 @@ export class ApiService {
 
   connect() {
     if (this.ws && this.ws.readyState <= 1) return;
-    this.ws = new WebSocket(`ws://${this.host}/ws`);
+    const wsRoot = this.apiRoot.replace(/^http/, 'ws');
+    this.ws = new WebSocket(`${wsRoot}/ws`);
     this.ws.onopen = () => this.connected.set(true);
     this.ws.onmessage = (e) => {
       const msg = JSON.parse(e.data);
