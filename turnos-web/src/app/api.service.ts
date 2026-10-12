@@ -39,7 +39,7 @@ export class ApiService {
         for (const desk of next.desks) {
           const ticket = desk.ticket;
           const oldTicket = previous.desks.find(item => item.id === desk.id)?.ticket;
-          if (ticket?.status === 'llamado' && ticket.id !== oldTicket?.id) {
+          if (ticket?.status === 'llamado' && (ticket.id !== oldTicket?.id || ticket.called_at !== oldTicket?.called_at)) {
             this.calls.next({ desk: desk.id, ticket });
           }
         }
