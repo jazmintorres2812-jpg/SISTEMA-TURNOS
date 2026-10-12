@@ -23,11 +23,17 @@ import { Ticket } from './models';
         </section>
       } @else {
         <p class="hint">¿Qué servicio necesita?</p>
-        <div class="btns">
-          @for (s of api.state().services; track s.prefix) {
-            <button [disabled]="busy()" (click)="take(s.prefix)">{{ s.name }}</button>
-          }
-        </div>
+        @if (api.state().services.length) {
+          <div class="btns">
+            @for (s of api.state().services; track s.prefix) {
+              <button [disabled]="busy()" (click)="take(s.prefix)">{{ s.name }}</button>
+            }
+          </div>
+        } @else {
+          <p class="connection" role="status">
+            {{ api.connected() ? 'Cargando servicios…' : 'Conectando con el sistema de turnos…' }}
+          </p>
+        }
       }
     </main>`,
   styles: [`
@@ -39,6 +45,7 @@ import { Ticket } from './models';
     .btns { width: min(780px, 100%); display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 18px; }
     .btns button { min-height: 130px; padding: 24px; border-radius: 22px; background: linear-gradient(145deg, #c084fc, #7c3aed); box-shadow: 0 14px 35px #02061766; font-size: 1.5rem; transition: transform .18s, box-shadow .18s; }
     .btns button:hover { transform: translateY(-4px); box-shadow: 0 18px 40px #02061799; }
+    .connection { color: #e9d5ff; font-size: 1rem; margin: 0; }
     .ticket { width: min(560px, 100%); padding: 38px 28px; border: 1px solid #ffffff30; border-radius: 28px; background: #f8fafc; color: #0f172a; box-shadow: 0 24px 80px #02061780; animation: appear .35s ease-out; }
     .ticket-label { display: inline-block; color: #475569; font-size: .9rem; font-weight: 800; letter-spacing: .16em; }
     .ticket h2 { font-size: clamp(6rem, 18vw, 9rem); line-height: 1; margin: 18px 0; color: #7c3aed; }
