@@ -42,6 +42,9 @@ class PgResult:
     def fetchall(self):
         return self.rows
 
+    def __iter__(self):
+        return iter(self.rows)
+
 
 class PgDatabase:
     """Small sqlite-compatible adapter; request connections come from middleware."""
