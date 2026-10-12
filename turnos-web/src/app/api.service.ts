@@ -1,35 +1,55 @@
 import { Injectable, inject, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
-import { Subject, firstValueFrom } from 'rxjs';
+import { Subject, firstValueFrom, timeout } from 'rxjs';
 import { CallEvent, State, Ticket } from './models';
 
 @Injectable({ providedIn: 'root' })
 export class ApiService {
   private http = inject(HttpClient);
-  // Configurable en public/api-config.js para apuntar al backend publicado.
+  // En producción la API comparte el dominio de Vercel; en local usa FastAPI:8000.
   private apiRoot = (window as Window & { TURNOS_API_URL?: string }).TURNOS_API_URL?.replace(/\/$/, '')
-    || `${location.protocol}//${location.hostname}:8000`;
+    || (['localhost', '127.0.0.1'].includes(location.hostname)
+      ? `${location.protocol}//${location.hostname}:8000`
+      : location.origin);
   private base = `${this.apiRoot}/api`;
 
   state = signal<State>({ services: [], desks: [], waiting: [] });
   calls = new Subject<CallEvent>();
   connected = signal(false);
-  private ws?: WebSocket;
+  private pollTimer?: number;
+  private refreshing = false;
+  private hasInitialState = false;
 
   connect() {
-    if (this.ws && this.ws.readyState <= 1) return;
-    const wsRoot = this.apiRoot.replace(/^http/, 'ws');
-    this.ws = new WebSocket(`${wsRoot}/ws`);
-    this.ws.onopen = () => this.connected.set(true);
-    this.ws.onmessage = (e) => {
-      const msg = JSON.parse(e.data);
-      if (msg.type === 'state') this.state.set(msg.state);
-      if (msg.type === 'call') this.calls.next({ desk: msg.desk, ticket: msg.ticket });
-    };
-    this.ws.onclose = () => {
+    if (this.pollTimer) return;
+    void this.refreshState();
+    this.pollTimer = window.setInterval(() => void this.refreshState(), 1500);
+  }
+
+  private async refreshState() {
+    if (this.refreshing) return;
+    this.refreshing = true;
+    try {
+      const next = await firstValueFrom(this.http.get<State>(`${this.base}/state`).pipe(timeout(7000)));
+      const previous = this.state();
+      this.state.set(next);
+      this.connected.set(true);
+
+      if (this.hasInitialState) {
+        for (const desk of next.desks) {
+          const ticket = desk.ticket;
+          const oldTicket = previous.desks.find(item => item.id === desk.id)?.ticket;
+          if (ticket?.status === 'llamado' && ticket.id !== oldTicket?.id) {
+            this.calls.next({ desk: desk.id, ticket });
+          }
+        }
+      }
+      this.hasInitialState = true;
+    } catch {
       this.connected.set(false);
-      setTimeout(() => this.connect(), 2000); // reconexión automática
-    };
+    } finally {
+      this.refreshing = false;
+    }
   }
 
   takeTicket(service: string): Promise<Ticket> {
